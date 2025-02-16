@@ -11,6 +11,11 @@
 - [ ] Fetch data every 1hr to take into account the data refreshing.
 - [ ] Make it more fancy later, first get this done
 
+>[!NOTICE]
+> I have finished the backend except for the public repo/api and fetching every hour. 
+> Fetching every hour can be based on my current function
+> handle the public repo/api without hitting limits first
+
 ### Frontend stuff
 - [ ] Create a Mercator map background (my lat,long assumptions is also going to play a decent role here)
 - [ ] Visualize trajectory by

@@ -13,10 +13,32 @@ from flask_cors import CORS
 import threading
 import matplotlib.pyplot as plt
 
+import openmeteo_requests
+
+import requests_cache
+from retry_requests import retry
+
+############################
+'''
+OPEN SOURCE API PARAMS
+'''
+
+# Setup the Open-Meteo API client with cache and retry on error
+cache_session = requests_cache.CachedSession('.cache', expire_after = 3600)
+retry_session = retry(cache_session, retries = 5, backoff_factor = 0.2)
+openmeteo = openmeteo_requests.Client(session = retry_session)
+
+# Make sure all required weather variables are listed here
+# The order of variables in hourly or daily is important to assign them correctly below
+url = "https://api.open-meteo.com/v1/forecast"
+####################
+
+
+
 CONSTELLATION_ENDPOINT = "https://a.windbornesystems.com/treasure/"
 DATA_DIR = "balloon_data"
 DB_FILE = 'balloon_trajectories.db'
-DISTANCE_THRESHOLD_KM = 100  # based on this old https://www.weather.gov/media/key/KEY%20-%20Weather%20Balloon%20Poster.pdf data
+DISTANCE_THRESHOLD_KM = 50  # based on this old https://www.weather.gov/media/key/KEY%20-%20Weather%20Balloon%20Poster.pdf data and https://sites.wff.nasa.gov/code820/pages/about/about-faq.html#:~:text=The%20balloon%20typically%20rises%20at,120%2C000%20ft%20(36.6%20km).
 # will change this to be dyanmic on history later
 QUADRANT_SIZE = 10  # Define quadrant size for spatial partitioning
 
@@ -47,12 +69,17 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             balloon_id TEXT,
             rowno INTEGER,
+            ass_rowno INTEGER,
             latitude REAL,
             longitude REAL,
             altitude REAL,
             timestamp TIMESTAMP,
             active INTEGER DEFAULT 1,
-            predicted INTEGER DEFAULT 0
+            predicted INTEGER DEFAULT 0,
+            corrupted INTEGER DEFAULT 0,
+            possible_kin TEXT,
+            strike INTEGRER DEFAULT 0,
+            d_moved REAL
         )
     ''')
     conn.commit()
@@ -65,16 +92,17 @@ def haversine(lat1, lon1, lat2, lon2):
     a = np.sin(dlat / 2) ** 2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon / 2) ** 2
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
+
 def get_quadrant(lat, lon):
     return int(lat // QUADRANT_SIZE), int(lon // QUADRANT_SIZE)
 
-def linear_extrapolate(past_points):
+def linear_extrapolate(past_points, time_diff):
     if len(past_points) < 2:
         return None
     lat_diff = past_points[-1][0] - past_points[-2][0]
     lon_diff = past_points[-1][1] - past_points[-2][1]
     alt_diff = past_points[-1][2] - past_points[-2][2]
-    return [past_points[-1][0] + lat_diff, past_points[-1][1] + lon_diff, past_points[-1][2] + alt_diff]
+    return [past_points[-1][0] + lat_diff * time_diff, past_points[-1][1] + lon_diff * time_diff, past_points[-1][2] + alt_diff * time_diff]
 
 def update_trajectories():
     while True:
@@ -94,7 +122,7 @@ def update_trajectories():
                             WHERE rowno = ? ORDER BY timestamp DESC LIMIT 2
                         ''', (rowno,))
                         past_points = cursor.fetchall()
-                        predicted_values = linear_extrapolate(past_points)
+                        predicted_values = linear_extrapolate(past_points, 1)
                         if predicted_values:
                             lat, lon, alt = predicted_values
                             predicted_flag = 1
@@ -155,6 +183,7 @@ def build_history():
                 for rowno, balloon in enumerate(data):
                     print(f'rowno {rowno}')
                     found = False
+                    lat, lon, alt = 0, 0, 0
                     if not first_time and (all(value == 0 for value in balloon) or not all(isinstance(value, (int, float)) and not np.isnan(value) for value in balloon)):
                         past_points = []
                         cursor.execute('''
@@ -164,18 +193,11 @@ def build_history():
                         past_points = cursor.fetchall()
                         
                         try:
-                            predicted_values = linear_extrapolate(past_points)
+                            predicted_values = linear_extrapolate(past_points, last_contacted - i)
                         except Exception as e:
                             print(f"linear extrapolation not possible, not enough data points ",past_points)
                         if predicted_values:
                             lat, lon, alt = predicted_values
-                            corr_lat, corr_lon, corr_alt = balloon
-                            if isinstance(corr_lat, (int, float)):
-                                lat = (lat + corr_lat) * 0.5
-                            if isinstance(corr_lon, (int, float)):
-                                lon = (lon + corr_lon) * 0.5
-                            if isinstance(corr_alt, (int, float)):
-                                alt = (alt + corr_alt) * 0.5
                             predicted_flag = 1
                         else:
                             continue
@@ -183,47 +205,50 @@ def build_history():
                         lat, lon, alt = balloon
                         predicted_flag = 0                                 
 
+                    # https://chatgpt.com/share/67b0ddda-6a7c-8013-bdcb-cec997cb853e
+                    # interesting line of prompts could be useful later
                     cursor.execute('''
-                        SELECT balloon_id, latitude, longitude, rowno FROM trajectories 
-                        WHERE active = 1 AND rowno = ? AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ?
-                        ORDER BY timestamp DESC
-                    ''', (rowno, lat - QUADRANT_SIZE, lat + QUADRANT_SIZE, lon - QUADRANT_SIZE, lon + QUADRANT_SIZE))
+                        SELECT balloon_id, latitude, longitude, rowno, timestamp FROM trajectories 
+                        WHERE active = 1 AND rowno = ? AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND corrupted = ? AND (possible_kin is NULL OR possible_kin = '')
+                        ORDER BY timestamp DESC LIMIT 1
+                    ''', (rowno, lat - QUADRANT_SIZE, lat + QUADRANT_SIZE, lon - QUADRANT_SIZE, lon + QUADRANT_SIZE, 0))
                     candidates = cursor.fetchall()
                     print(f'prime candidates: {candidates}')
-                    
+                   
+                    # they could probably be associated with any other row's trajectory. coz every row need not map to the same row in the next hour
                     if not candidates:
                         cursor.execute('''
-                            SELECT balloon_id, latitude, longitude, rowno FROM trajectories 
-                            WHERE active = 1 AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? ORDER BY timestamp DESC
-                        ''', (lat - QUADRANT_SIZE, lat + QUADRANT_SIZE, lon - QUADRANT_SIZE, lon + QUADRANT_SIZE))
+                            SELECT balloon_id, latitude, longitude, rowno, timestamp FROM trajectories 
+                            WHERE active = 1 AND latitude BETWEEN ? AND ? AND longitude BETWEEN ? AND ? AND corrupted = ? AND (possible_kin is NULL OR possible_kin = '')
+                            ORDER BY timestamp DESC LIMIT 1
+                        ''', (lat - QUADRANT_SIZE, lat + QUADRANT_SIZE, lon - QUADRANT_SIZE, lon + QUADRANT_SIZE, 0))
                         candidates = cursor.fetchall()  
 
-                    if not candidates:
-                        cursor.execute('''
-                            SELECT balloon_id, latitude, longitude, rowno FROM trajectories 
-                            WHERE active = 1 ORDER BY timestamp DESC
-                        ''')
-                        candidates = cursor.fetchall()
-                    
-                    for balloon_id, last_lat, last_lon,_ in candidates:
+                    print(candidates)
+                    for balloon_id, last_lat, last_lon,_, time in candidates:
                         if first_time: break
+                        dist_lat, dist_lon = [2 * (last_contacted - i)] * 2 
                         try:
+                            
                             if isinstance(last_lat, (int, float)) and isinstance(last_lon, (int, float)):
-                                # dist = haversine(last_lat, last_lon, lat, lon)
+                                dist = haversine(last_lat, last_lon, lat, lon)
+                                #print(f'dist = {dist}')
                                 dist_lat = abs(last_lat - lat)
                                 dist_lon = abs(last_lon - lon)
                                 # print(last_contacted - i, dist, balloon_id, _)
                                 #print(dist)
                             else:
+                                #dist = 60
                                 dist_lat, dist_lon = [2 * (last_contacted - i)] * 2 # just a dummy above the threshold
                         except Exception as e:
                             print(f"haversine failing, {last_lat}, {last_lon}, {lat}, {lon}, {candidates}")
-                        if dist_lat < 3.5 * (last_contacted - i) and dist_lon < 3.5 * (last_contacted - i):
+                        
+                        if dist_lat < 1.9 * (last_contacted - i) and dist_lon < 1.9 * (last_contacted - i):
                             try:
                                 cursor.execute('''
-                                    INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                                ''', (balloon_id, rowno, lat, lon, alt, timestamp, 1, predicted_flag))
+                                    INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted, ass_rowno, d_moved)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                ''', (balloon_id, rowno, lat, lon, alt, timestamp, 1, predicted_flag, _, dist))
                                 found = True
                                 break
 
@@ -233,11 +258,68 @@ def build_history():
                     
                     if not found:
                         try:
+                            corrupted = 0
+                            possible_kin = ''
+                            strike = 0
                             new_id = str(uuid.uuid4())
+                            print(first_time)
+
+                            
+                            if not first_time:
+                                print('not firsttime')
+                                # create redundancy with 3 strikes
+                                # this is basically my way of modelling data corruption -- i am going to have a system that basically associates any lat,lon change to both its "possible" candidate and a new trajectory. if after 3 strikes it continues to be associated with a new traj rather than its potential candiate, we let it be a new set of trajectory and deactivate the old trajectory. On the flip side if we get it back on track with its candidate (this what we call data corruption here), we mark the corrupted data, place predicted data in its place (show both actually) and then flag the newly created bucket (not the same as deactivation).
+                                cursor.execute('''
+                                    SELECT latitude, longitude, altitude, balloon_id, rowno, strike FROM trajectories 
+                                    WHERE active = 1 AND rowno = ? AND corrupted = ? AND (possible_kin IS NULL OR possible_kin = '')
+                                    ORDER BY timestamp DESC LIMIT 1
+                                ''', (rowno, 0)) 
+                                candidates = cursor.fetchall()
+                                possible_kin = candidates[0][3]
+                                dist = haversine(candidates[0][0], candidates[0][1], lat, lon)
+
+                                corrupted = 1
+                                strike = max(1, int(candidates[0][5]) + 1)
+                            
+                                if strike <= 3:
+                                    try:
+                                        p_lat, p_lon, p_alt = linear_extrapolate(past_points, last_contacted - i)
+                                        cursor.execute('''
+                                            INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted, corrupted, strike, d_moved)
+                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        ''', (possible_kin, rowno, p_lat, p_lon, p_alt, timestamp, 1, 1, 0, strike, dist))
+
+                                    except Exception as e:
+                                        print(f"here.. linear extrapolation not possible, not enough data points ",past_points)
+                                    cursor.execute('''
+                                        INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted, corrupted, strike, d_moved)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    ''', (possible_kin, rowno, lat, lon, alt, timestamp, 1, 0, corrupted, strike, dist))
+                                    
+                                    past_points = candidates
+                                    
+    
+    
+                                else:
+                                    possible_kin = ''
+                                    # YOU HAVE TO DEACTIVATE YOUR OLD TRAJECTORIES HERE
+                             
                             cursor.execute('''
-                                INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                            ''', (new_id, rowno, lat, lon, alt, timestamp, 1, predicted_flag))
+                                SELECT latitude, longitude, altitude, balloon_id, rowno, strike FROM trajectories 
+                                WHERE active = 1 AND rowno = ? AND possible_kin = ?
+                                ORDER BY timestamp DESC LIMIT 1
+                            ''', (rowno, possible_kin)) 
+                            candidates = cursor.fetchall()
+                            
+                            if candidates:
+                                new_id = candidates[0][3]
+                            
+
+                            cursor.execute('''
+                                INSERT INTO trajectories (balloon_id, rowno, latitude, longitude, altitude, timestamp, active, predicted, possible_kin)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            ''', (new_id, rowno, lat, lon, alt, timestamp, 1, predicted_flag, possible_kin))
+
                         except Exception as e:
                             print(f"db insertion exception: {e}")
                             print(f"values parsed: {lat}, {lon}, {alt}")
@@ -250,23 +332,6 @@ def build_history():
     
     conn.commit()
     conn.close()
-
-def visualize():
-    conn = sqlite3.connect(DB_FILE)
-    cursor = conn.cursor()
-    cursor.execute("SELECT latitude, longitude FROM trajectories")
-    data = cursor.fetchall()
-    conn.close()
-    
-    lats, lons = zip(*data)
-    plt.figure(figsize=(10, 6))
-    plt.scatter(lons, lats, c='blue', alpha=0.5, label='Balloon Trajectories')
-    plt.xlabel("Longitude")
-    plt.ylabel("Latitude")
-    plt.title("Balloon Trajectories Visualization")
-    plt.legend()
-    plt.savefig("trajectory.png")
-    #return jsonify({"message": "Visualization saved as trajectory.png"})
 
 app = Flask(__name__)
 CORS(app)
@@ -315,7 +380,7 @@ def generate_3d_plot(balloon_id):
     cursor = conn.cursor()
     
     cursor.execute("""
-        SELECT latitude, longitude, altitude, predicted, timestamp
+        SELECT latitude, longitude, altitude, predicted, corrupted, timestamp
         FROM trajectories 
         WHERE balloon_id = ? 
         ORDER BY timestamp
@@ -324,15 +389,18 @@ def generate_3d_plot(balloon_id):
     points = cursor.fetchall()
     conn.close()
     
-    if not points:
+
+    
+    if not points or len(points) < 3:
         return None
         
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111, projection='3d')
     
     # Separate regular and predicted points
-    regular_points = [(p[0], p[1], p[2]) for p in points if not p[3]]
+    regular_points = [(p[0], p[1], p[2]) for p in points if not p[3] and not p[4]]
     predicted_points = [(p[0], p[1], p[2]) for p in points if p[3]]
+    corrupted_points = [(p[0], p[1], p[2]) for p in points if p[4]]
     
     if regular_points:
         lats, lons, alts = zip(*regular_points)
@@ -341,7 +409,11 @@ def generate_3d_plot(balloon_id):
     
     if predicted_points:
         lats, lons, alts = zip(*predicted_points)
-        ax.scatter(lons, lats, alts, c='red', marker='x', label='Predicted Points')
+        ax.scatter(lons, lats, alts, c='green', marker='^', label='Predicted Points')
+
+    if corrupted_points:
+        lats, lons, alts = zip(*corrupted_points)
+        ax.scatter(lons, lats, alts, c='red', marker='x', label='Corrupted Points')
     
     ax.set_xlabel('Longitude')
     ax.set_ylabel('Latitude')
