@@ -31,7 +31,7 @@ The tech stack used: Flask (backend), React (Frontend), SQLite (DB Engine)
     - Add a sentence to the `notes` explaining why you chose the external api/dataset you did!
       ### Solution:
     - I got open-meteo's help here which is a free weather api. 
-    - The sole reason this was added to introduce more robustness to real time prediction.
+    - The sole reason this was added was to introduce more robustness to real time prediction.
     - While using GaussianProcessRegressor to predict points gave decent predictions, using additional influencing factors would make the prediciton more robust.
     - Also to respect the fact that I am using a public api, I have put in a hard check on the number of api calls.
     - This also influenced my decision to use the wind data only in new predictions rather than in the corruption correction stage.
