@@ -3,7 +3,7 @@ import "./App.css";
 import { Ion, Viewer, Cartesian3, Color, Entity, ScreenSpaceEventHandler, ScreenSpaceEventType, defined, PolylineGlowMaterialProperty, PolylineGraphics } from "cesium";
 import { Button, Dialog, DialogTitle, DialogContent, Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, List, ListItem, ListItemButton, ListItemText, Divider, IconButton } from "@mui/material";
 import CloseIcon from "@mui/icons-material/Close";
-Ion.defaultAccessToken = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiIwYzMwMWI5MS05ZDJkLTQ5NjktODIzYS1lODE2MmZlZmNhNzEiLCJpZCI6Mjc2NTQ1LCJpYXQiOjE3Mzk3NjQzMzF9.D3B9JA0PszHK8x1w38AzyizSNJLh8D1tTRnUko_9rew";
+Ion.defaultAccessToken = "token_goes_here";
 
 function App() {
   const cesiumContainerRef = useRef(null);
