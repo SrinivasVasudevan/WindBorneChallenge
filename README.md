@@ -15,7 +15,7 @@ The tech stack used: Flask (backend), React (Frontend), SQLite (DB Engine)
     - `01.json` is the state an hour ago, `03.json` is from three hours ago, etc, up to 23H ago.
     - The outputs are **undocumented** and may sometimes be **corrupted**—sorryy ¯\\_(ツ)_/¯.
     - You should robustly extract the available flight history for our constellation
-    - ###Solution:
+      ### Solution:
     - The backend first builds a history of the balloon's trajectory by parsing the response from the corresponding json files and storing it in the database.
     - Here there are several criteria that a new landmark point needs to satisfy to be part of the trajectory.
         - It needs to have travelled a distance/hour closer to the moving median of the past point
@@ -29,7 +29,7 @@ The tech stack used: Flask (backend), React (Frontend), SQLite (DB Engine)
     - What insights or problems could you tackle with both of these data feeds?
     - Remember, our API is **live**, so whatever you build should **update dynamically** with the latest `24H` of data.
     - Add a sentence to the `notes` explaining why you chose the external api/dataset you did!
-    - ###Solution:
+      ### Solution:
     - I got open-meteo's help here which is a free weather api. 
     - The sole reason this was added to introduce more robustness to real time prediction.
     - While using GaussianProcessRegressor to predict points gave decent predictions, using additional influencing factors would make the prediciton more robust.
@@ -39,7 +39,7 @@ The tech stack used: Flask (backend), React (Frontend), SQLite (DB Engine)
 3. **Host your creation** on a publicly accessible URL
     - We can't wait to see what you build!
     - this should be the actual interative webpage, not a static repo
-    - ###Solution:
+      ### Solution:
     - Should be live through AWS.
 
 
